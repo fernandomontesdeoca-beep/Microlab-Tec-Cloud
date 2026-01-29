@@ -242,17 +242,13 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
 
             // Función auxiliar para buscar una tabla después de un texto específico (ej: "C. Alterna")
             const findTableAfterText = (searchText: string) => {
-                // Buscamos en varios tipos de elementos que pueden contener el título
                 const elements = Array.from(doc.querySelectorAll('p, div, h1, h2, h3, h4, em, strong'));
                 for (let i = 0; i < elements.length; i++) {
                     if (elements[i].textContent?.includes(searchText)) {
-                        // Buscamos en los siguientes hermanos hasta encontrar una tabla
                         let sibling = elements[i].nextElementSibling;
-                        // Limitamos la búsqueda a 5 hermanos para no ir muy lejos
                         let tries = 0;
                         while (sibling && tries < 10) {
                             if (sibling.tagName === 'TABLE') return sibling;
-                            // A veces la tabla está dentro de un div hermano
                             if (sibling.querySelector('table')) return sibling.querySelector('table');
                             sibling = sibling.nextElementSibling;
                             tries++;
@@ -265,16 +261,13 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
             const acTable = findTableAfterText('C. Alterna');
             const dcTable = findTableAfterText('C. Continua');
 
-            // Función para extraer valores de las filas de la tabla
             const extractValueFromTable = (table: Element | null, rowLabel: string) => {
                 if (!table) return null;
                 const rows = table.querySelectorAll('tr');
                 for (const row of rows) {
                     if (row.textContent?.includes(rowLabel)) {
                         const cells = row.querySelectorAll('td');
-                        // Asumimos que el valor está en la segunda celda (índice 1)
                         if (cells[1]) {
-                             // Regex para buscar número tipo "54,8"
                              const match = cells[1].textContent?.match(/(\d+[,.]\d+)/);
                              return match ? match[1].replace(',', '.') : null;
                         }
@@ -286,10 +279,9 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
             const newValues: any = {};
             let found = false;
 
-            // Extraer datos AC
             const acBase = extractValueFromTable(acTable, 'Cargo base');
             const acEnergy = extractValueFromTable(acTable, 'Energía');
-            const acIdle = extractValueFromTable(acTable, 'Tiempo sin carga'); // "Tiempo sin carga (*)"
+            const acIdle = extractValueFromTable(acTable, 'Tiempo sin carga');
 
             if (acEnergy) {
                 if(acBase) newValues.ev_ac_base = acBase;
@@ -298,7 +290,6 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
                 found = true;
             }
 
-            // Extraer datos DC
             const dcBase = extractValueFromTable(dcTable, 'Cargo base');
             const dcEnergy = extractValueFromTable(dcTable, 'Energía');
             const dcIdle = extractValueFromTable(dcTable, 'Tiempo sin carga');
@@ -337,9 +328,14 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
             
             const parser = new DOMParser();
             const doc = parser.parseFromString(html, 'text/html');
-            const rows = doc.querySelectorAll('table tbody tr');
+            // Buscamos específicamente la tabla dentro de .Table-wrapper
+            const table = doc.querySelector('.Table-wrapper table') || doc.querySelector('table');
+            if(!table) throw new Error("No se encontró la estructura de tabla esperada (.Table-wrapper).");
+
+            const rows = table.querySelectorAll('tbody tr');
             
-            const cleanPrice = (str: string) => {
+            const cleanPrice = (str: string | null | undefined) => {
+                if (!str) return null;
                 const match = str.match(/(\d{2,4}[,.]\d{2})/);
                 return match ? match[1].replace(',', '.') : null;
             };
@@ -349,15 +345,28 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
 
             rows.forEach((row) => {
                 const cells = row.querySelectorAll('td');
-                // Asumimos que la primera columna es el número de Categoría (1-7)
+                // Asumimos que la primera columna siempre contiene el número de categoría
                 const catStr = cells[0]?.textContent?.trim();
                 const catNum = parseInt(catStr || '0');
 
                 if (catNum >= 1 && catNum <= 7) {
-                    // Mapeo basado en estructura: Col 0=ID, Col 1=Desc, Col 2=Basic, Col 3=Tele, Col 4=Sucive
-                    const basicRaw = cells[2]?.textContent || '';
-                    const teleRaw = cells[3]?.textContent || '';
-                    const suciveRaw = cells[4]?.textContent || '';
+                    // Usamos data-title para buscar las columnas independientemente de su posición
+                    // El HTML provisto usa: 
+                    // data-title="Categoría"
+                    // data-title="Tarifa BÁSICA (en cada sentido)"
+                    // data-title="Telepeaje"
+                    // data-title="SUCIVE"
+                    
+                    const getVal = (keyPart: string) => {
+                        const cell = Array.from(cells).find(c => 
+                            c.getAttribute('data-title')?.toLowerCase().includes(keyPart.toLowerCase())
+                        );
+                        return cell?.textContent || '';
+                    };
+
+                    const basicRaw = getVal('Tarifa BÁSICA');
+                    const teleRaw = getVal('Telepeaje');
+                    const suciveRaw = getVal('SUCIVE');
 
                     const basic = cleanPrice(basicRaw);
                     const tele = cleanPrice(teleRaw);
@@ -383,7 +392,7 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
                 setLocalSettings((prev: any) => ({ ...prev, mtop_updated: new Date().toISOString(), mtop_source: 'auto' }));
                 setToast({ msg: `Actualizadas ${updatesCount} categorías de peaje.`, type: 'success' });
             } else {
-                throw new Error("No se encontraron datos válidos en la tabla del MTOP.");
+                throw new Error("No se encontraron datos de precios válidos en la tabla.");
             }
         } catch (e: any) {
             setToast({ msg: "Error MTOP: " + e.message, type: 'error' });
