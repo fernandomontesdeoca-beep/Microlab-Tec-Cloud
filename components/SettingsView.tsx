@@ -1,6 +1,6 @@
 
-import React, { useState, useRef } from 'react';
-import { ArrowLeft, Settings, Upload, User as UserIcon, LogOut, Fuel, Zap, Map, Route, Trash, Loader, AlertTriangle, RefreshCw, ChevronDown, ChevronUp, Eye, Globe, FileSpreadsheet, Download } from 'lucide-react';
+import React, { useState, useRef, useEffect } from 'react';
+import { ArrowLeft, Settings, Upload, User as UserIcon, LogOut, Fuel, Zap, Map, Route, Trash, Loader, AlertTriangle, RefreshCw, ChevronDown, ChevronUp, Eye, Globe, FileSpreadsheet, Download, Truck } from 'lucide-react';
 import { addData, setData, importDataBatch, clearCollectionData, deleteData, subscribeToCollection } from '../services/firebaseConfig.ts';
 import { Input, Button, Toast, ConfirmationModal } from './UIComponents.tsx';
 import { theme } from '../theme.ts';
@@ -14,10 +14,12 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
     
     // Estado para cargas de precios oficiales
     const [loadingSection, setLoadingSection] = useState<string | null>(null);
-    const [showTollCategories, setShowTollCategories] = useState(false);
 
     // Estado Exportación
     const [exportRange, setExportRange] = useState({ start: '', end: '' });
+
+    // Estado para Categoría de Peaje Seleccionada
+    const [selectedTollCat, setSelectedTollCat] = useState<number>(1);
 
     // Cargar tickets para exportación si es necesario
     React.useEffect(() => {
@@ -58,9 +60,9 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
         ev_dc_base: '132.9',
         ev_dc_energy: '11.8',
         ev_dc_idle: '12.3',
-        toll_telepeaje: '142.98',
-        toll_basic: '185.00',
-        toll_sucive: '185.00',
+        toll_telepeaje: '162.00',
+        toll_basic: '190.20',
+        toll_sucive: '207.00',
         km_company_fuel: '8.72',
         km_company_ev: '1.03',
         km_personal: '14.24',
@@ -69,15 +71,31 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
 
     const [localSettings, setLocalSettings] = useState({ ...defaultPricing, ...settings });
     
-    const [tollTableData, setTollTableData] = useState([
-        { cat: 1, desc: 'Autos / Camionetas', telepeaje: 142.50, efectivo: 185.00 },
-        { cat: 2, desc: 'Omnibus Expr. / Micro', telepeaje: 142.50, efectivo: 185.00 },
-        { cat: 3, desc: 'Vehículos 2 ejes', telepeaje: 205.00, efectivo: 265.00 },
-        { cat: 4, desc: 'Vehículos 3 ejes', telepeaje: 285.00, efectivo: 370.00 },
-        { cat: 5, desc: 'Vehículos 4 ejes', telepeaje: 490.00, efectivo: 635.00 },
-        { cat: 6, desc: 'Carga 3 ejes', telepeaje: 490.00, efectivo: 635.00 },
-        { cat: 7, desc: 'Carga 4+ ejes', telepeaje: 965.00, efectivo: 1250.00 },
+    // Tabla de Peajes completa (Cat 1-7)
+    // Se inicializa con valores por defecto, pero se sobrescribe si hay datos en 'settings.toll_matrix' o al hacer fetch
+    const [tollTableData, setTollTableData] = useState<any[]>(settings.toll_matrix || [
+        { cat: 1, desc: 'Autos / Camionetas', telepeaje: '162.00', basic: '190.20', sucive: '207.00' },
+        { cat: 2, desc: 'Omnibus Expr. / Micro', telepeaje: '162.00', basic: '190.20', sucive: '207.00' },
+        { cat: 3, desc: 'Vehículos 2 ejes', telepeaje: '217.00', basic: '255.02', sucive: '278.00' },
+        { cat: 4, desc: 'Vehículos 3 ejes', telepeaje: '217.00', basic: '255.02', sucive: '278.00' },
+        { cat: 5, desc: 'Vehículos 4 ejes', telepeaje: '443.00', basic: '520.66', sucive: '568.00' },
+        { cat: 6, desc: 'Carga 3 ejes', telepeaje: '443.00', basic: '520.66', sucive: '568.00' },
+        { cat: 7, desc: 'Carga 4+ ejes', telepeaje: '741.00', basic: '871.31', sucive: '950.00' },
     ]);
+
+    // Cuando cambia la categoría seleccionada o la tabla de datos, actualizamos los valores "Globales"
+    // para que la app use el precio de la categoría que el usuario está viendo/editando.
+    useEffect(() => {
+        const currentCatData = tollTableData.find(r => r.cat === selectedTollCat);
+        if (currentCatData) {
+            setLocalSettings(prev => ({
+                ...prev,
+                toll_telepeaje: currentCatData.telepeaje,
+                toll_basic: currentCatData.basic,
+                toll_sucive: currentCatData.sucive
+            }));
+        }
+    }, [selectedTollCat, tollTableData]);
 
     const fileInputInv = useRef<HTMLInputElement>(null);
     const fileInputCont = useRef<HTMLInputElement>(null);
@@ -91,8 +109,25 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
         }));
     };
 
+    // Actualiza un valor específico en la tabla de peajes
+    const updateTollTable = (cat: number, key: 'telepeaje'|'basic'|'sucive', value: string) => {
+        const newData = tollTableData.map(row => {
+            if (row.cat === cat) {
+                return { ...row, [key]: value };
+            }
+            return row;
+        });
+        setTollTableData(newData);
+        updateSection('mtop', 'toll_updated', new Date().toISOString()); // Marca timestamp
+    };
+
     const handleSaveSettings = async () => {
-        await setData('settings', 'config', localSettings);
+        // Guardamos la configuración plana Y la matriz completa de peajes
+        const dataToSave = {
+            ...localSettings,
+            toll_matrix: tollTableData
+        };
+        await setData('settings', 'config', dataToSave);
         setToast({ msg: 'Configuración guardada correctamente.', type: 'success' });
     };
 
@@ -148,29 +183,11 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
         throw new Error("No se pudo conectar a la web oficial (Bloqueo de seguridad o Proxies saturados).");
     };
 
-    /**
-     * Busca un precio en el texto usando un patrón específico para ANCAP y otros.
-     * Busca: Nombre del producto + caracteres intermedios + $ + espacio opcional + NUMERO
-     */
-    const extractPrice = (text: string, keyword: string): string | null => {
-        // Normalizamos el texto
-        const cleanText = text.replace(/\s+/g, ' '); 
-        // Regex: Palabra clave + cualquier cosa (no greedy) + signo $ + espacios opcionales + (DIGITOS , DIGITOS)
-        const regex = new RegExp(`${keyword}.*?\\$\\s*(\\d{2,3}[,.]\\d{2})`, 'i');
-        const match = cleanText.match(regex);
-        
-        if (match && match[1]) {
-            return match[1].replace(',', '.');
-        }
-        return null;
-    };
-
     // --- FUNCIONES DE ACTUALIZACIÓN ---
 
     const fetchAncapData = async () => {
         setLoadingSection('fuel');
         try {
-            // Definimos las URLs específicas para cada producto
             const products = [
                 { key: 'fuel_super95', url: 'https://www.ancap.com.uy/1636/1/super-95.html' },
                 { key: 'fuel_premium97', url: 'https://www.ancap.com.uy/1637/1/premium-97.html' },
@@ -181,14 +198,10 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
             const newPrices: any = {};
             let foundAny = false;
 
-            // Procesamos todas las URLs en paralelo
             await Promise.all(products.map(async (prod) => {
                 try {
                     const html = await fetchHtmlContent(prod.url);
-                    // Buscamos específicamente: id="envaseprecio">$ 77.79</div>
-                    // Regex: id="envaseprecio" [cualquier cosa hasta el cierre de tag] > [espacios] $ [espacios] (NUMERO)
                     const match = html.match(/id="envaseprecio"[^>]*>\s*\$\s*(\d+[,.]\d+)/i);
-                    
                     if (match && match[1]) {
                         newPrices[prod.key] = match[1].replace(',', '.');
                         foundAny = true;
@@ -220,23 +233,97 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
     const fetchUteData = async () => {
         setLoadingSection('ute');
         try {
-            const html = await fetchHtmlContent('https://movilidad.ute.com.uy/');
-            // Buscamos patrones simples que suelen aparecer incluso en el JS embebido
-            const acEnergy = extractPrice(html, 'Energía') || extractPrice(html, 'energyPrice');
+            // URL Oficial de Tarifas de Movilidad Eléctrica
+            const url = 'https://www.ute.com.uy/clientes/movilidad-electrica/carga-de-vehiculos';
+            const html = await fetchHtmlContent(url);
             
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, 'text/html');
+
+            // Función auxiliar para buscar una tabla después de un texto específico (ej: "C. Alterna")
+            const findTableAfterText = (searchText: string) => {
+                // Buscamos en varios tipos de elementos que pueden contener el título
+                const elements = Array.from(doc.querySelectorAll('p, div, h1, h2, h3, h4, em, strong'));
+                for (let i = 0; i < elements.length; i++) {
+                    if (elements[i].textContent?.includes(searchText)) {
+                        // Buscamos en los siguientes hermanos hasta encontrar una tabla
+                        let sibling = elements[i].nextElementSibling;
+                        // Limitamos la búsqueda a 5 hermanos para no ir muy lejos
+                        let tries = 0;
+                        while (sibling && tries < 10) {
+                            if (sibling.tagName === 'TABLE') return sibling;
+                            // A veces la tabla está dentro de un div hermano
+                            if (sibling.querySelector('table')) return sibling.querySelector('table');
+                            sibling = sibling.nextElementSibling;
+                            tries++;
+                        }
+                    }
+                }
+                return null;
+            };
+
+            const acTable = findTableAfterText('C. Alterna');
+            const dcTable = findTableAfterText('C. Continua');
+
+            // Función para extraer valores de las filas de la tabla
+            const extractValueFromTable = (table: Element | null, rowLabel: string) => {
+                if (!table) return null;
+                const rows = table.querySelectorAll('tr');
+                for (const row of rows) {
+                    if (row.textContent?.includes(rowLabel)) {
+                        const cells = row.querySelectorAll('td');
+                        // Asumimos que el valor está en la segunda celda (índice 1)
+                        if (cells[1]) {
+                             // Regex para buscar número tipo "54,8"
+                             const match = cells[1].textContent?.match(/(\d+[,.]\d+)/);
+                             return match ? match[1].replace(',', '.') : null;
+                        }
+                    }
+                }
+                return null;
+            };
+
+            const newValues: any = {};
+            let found = false;
+
+            // Extraer datos AC
+            const acBase = extractValueFromTable(acTable, 'Cargo base');
+            const acEnergy = extractValueFromTable(acTable, 'Energía');
+            const acIdle = extractValueFromTable(acTable, 'Tiempo sin carga'); // "Tiempo sin carga (*)"
+
             if (acEnergy) {
+                if(acBase) newValues.ev_ac_base = acBase;
+                if(acEnergy) newValues.ev_ac_energy = acEnergy;
+                if(acIdle) newValues.ev_ac_idle = acIdle;
+                found = true;
+            }
+
+            // Extraer datos DC
+            const dcBase = extractValueFromTable(dcTable, 'Cargo base');
+            const dcEnergy = extractValueFromTable(dcTable, 'Energía');
+            const dcIdle = extractValueFromTable(dcTable, 'Tiempo sin carga');
+
+             if (dcEnergy) {
+                if(dcBase) newValues.ev_dc_base = dcBase;
+                if(dcEnergy) newValues.ev_dc_energy = dcEnergy;
+                if(dcIdle) newValues.ev_dc_idle = dcIdle;
+                found = true;
+            }
+
+            if (found) {
                  setLocalSettings((prev: any) => ({
                     ...prev,
-                    ev_ac_energy: acEnergy || prev.ev_ac_energy,
+                    ...newValues,
                     ute_updated: new Date().toISOString(),
                     ute_source: 'auto'
                 }));
-                setToast({ msg: 'Tarifas UTE actualizadas.', type: 'success' });
+                setToast({ msg: 'Tarifas UTE (AC/DC) actualizadas correctamente.', type: 'success' });
             } else {
-                 throw new Error("La web de UTE requiere ingreso manual (SPA protegida).");
+                 throw new Error("No se encontraron las tablas 'C. Alterna' o 'C. Continua' en la página.");
             }
         } catch (e: any) {
-            setToast({ msg: e.message, type: 'error' });
+            console.error(e);
+            setToast({ msg: "Error UTE: " + e.message, type: 'error' });
         } finally {
             setLoadingSection(null);
         }
@@ -245,28 +332,58 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
     const fetchMtopData = async () => {
         setLoadingSection('mtop');
         try {
-            const html = await fetchHtmlContent('https://www.gub.uy/ministerio-transporte-obras-publicas/politicas-y-gestion/tarifas-peajes');
-            const text = stripHtml(html);
+            const url = 'https://www.gub.uy/ministerio-transporte-obras-publicas/politicas-y-gestion/tarifas';
+            const html = await fetchHtmlContent(url);
             
-            // Buscar tarifa Auto/Camioneta
-            // En MTOP a veces no usan el signo $ pegado al numero, asi que usamos una regex más generica para este caso
-            const telepeajeMatch = text.match(/Autos.*?camionetas.*?(\d{3,4}[,.]\d{2}|\d{3,4})/i);
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, 'text/html');
+            const rows = doc.querySelectorAll('table tbody tr');
             
-            if (telepeajeMatch && telepeajeMatch[1]) {
-                const telVal = parseFloat(telepeajeMatch[1].replace(',', '.'));
-                const efVal = (telVal * 1.3).toFixed(2); 
+            const cleanPrice = (str: string) => {
+                const match = str.match(/(\d{2,4}[,.]\d{2})/);
+                return match ? match[1].replace(',', '.') : null;
+            };
 
-                setLocalSettings((prev: any) => ({
-                    ...prev,
-                    toll_telepeaje: telVal.toFixed(2),
-                    toll_basic: efVal,
-                    toll_sucive: efVal,
-                    mtop_updated: new Date().toISOString(),
-                    mtop_source: 'auto'
-                }));
-                setToast({ msg: 'Tarifas Peaje actualizadas.', type: 'success' });
+            const updatedTable = [...tollTableData];
+            let updatesCount = 0;
+
+            rows.forEach((row) => {
+                const cells = row.querySelectorAll('td');
+                // Asumimos que la primera columna es el número de Categoría (1-7)
+                const catStr = cells[0]?.textContent?.trim();
+                const catNum = parseInt(catStr || '0');
+
+                if (catNum >= 1 && catNum <= 7) {
+                    // Mapeo basado en estructura: Col 0=ID, Col 1=Desc, Col 2=Basic, Col 3=Tele, Col 4=Sucive
+                    const basicRaw = cells[2]?.textContent || '';
+                    const teleRaw = cells[3]?.textContent || '';
+                    const suciveRaw = cells[4]?.textContent || '';
+
+                    const basic = cleanPrice(basicRaw);
+                    const tele = cleanPrice(teleRaw);
+                    const sucive = cleanPrice(suciveRaw);
+
+                    if (tele) {
+                        const index = updatedTable.findIndex(r => r.cat === catNum);
+                        if (index !== -1) {
+                            updatedTable[index] = {
+                                ...updatedTable[index],
+                                telepeaje: tele,
+                                basic: basic || tele,
+                                sucive: sucive || basic || tele
+                            };
+                            updatesCount++;
+                        }
+                    }
+                }
+            });
+            
+            if (updatesCount > 0) {
+                setTollTableData(updatedTable);
+                setLocalSettings((prev: any) => ({ ...prev, mtop_updated: new Date().toISOString(), mtop_source: 'auto' }));
+                setToast({ msg: `Actualizadas ${updatesCount} categorías de peaje.`, type: 'success' });
             } else {
-                throw new Error("No se encontró precio Cat. 1 en MTOP");
+                throw new Error("No se encontraron datos válidos en la tabla del MTOP.");
             }
         } catch (e: any) {
             setToast({ msg: "Error MTOP: " + e.message, type: 'error' });
@@ -447,6 +564,9 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
         </div>
     );
 
+    // Obtener los datos de la categoría actualmente seleccionada
+    const activeTollData = tollTableData.find(r => r.cat === selectedTollCat) || tollTableData[0];
+
     return (
         <div className={`pb-24 ${theme.animation.fade} relative min-h-[500px]`}>
             {toast && <Toast message={toast.msg} type={toast.type} onClose={() => setToast(null)} />}
@@ -524,48 +644,52 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
 
                     {/* Peajes */}
                     <div className="bg-white p-4 rounded-xl shadow-sm relative">
-                        <SectionHeader icon={Map} title="Peajes (Cat. 1)" onUpdate={fetchMtopData} loadingKey="mtop" />
+                        <SectionHeader icon={Map} title="Peajes / Categoría" onUpdate={fetchMtopData} loadingKey="mtop" />
+                        
+                        {/* Selector de Categoría */}
+                        <div className="mb-4 bg-blue-50 p-3 rounded-lg border border-blue-100">
+                            <label className="block text-[10px] font-bold uppercase text-blue-800 mb-1">Categoría del Vehículo</label>
+                            <div className="relative">
+                                <select 
+                                    className="w-full p-2 rounded border border-blue-200 text-sm font-bold text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 appearance-none bg-white"
+                                    value={selectedTollCat}
+                                    onChange={(e) => setSelectedTollCat(Number(e.target.value))}
+                                >
+                                    {tollTableData.map((row) => (
+                                        <option key={row.cat} value={row.cat}>
+                                            {row.cat} - {row.desc}
+                                        </option>
+                                    ))}
+                                </select>
+                                <ChevronDown className="absolute right-3 top-2.5 w-4 h-4 text-gray-500 pointer-events-none" />
+                            </div>
+                            <p className="text-[10px] text-blue-600 mt-2 leading-tight">
+                                * Los precios que ves aquí serán los utilizados al agregar gastos de Peaje en los reportes.
+                            </p>
+                        </div>
+
+                        {/* Inputs Dinámicos Basados en la Selección */}
                         <div className="grid grid-cols-3 gap-2 mb-4">
-                            <Input label="Telepeaje" type="number" val={localSettings.toll_telepeaje} set={(v:any) => updateSection('mtop', 'toll_telepeaje', v)} />
-                            <Input label="Tarifa BÁSICA" type="number" val={localSettings.toll_basic} set={(v:any) => updateSection('mtop', 'toll_basic', v)} />
-                            <Input label="SUCIVE" type="number" val={localSettings.toll_sucive} set={(v:any) => updateSection('mtop', 'toll_sucive', v)} />
+                            <Input 
+                                label="Telepeaje" 
+                                type="number" 
+                                val={activeTollData.telepeaje} 
+                                set={(v:any) => updateTollTable(selectedTollCat, 'telepeaje', v)} 
+                            />
+                            <Input 
+                                label="Tarifa BÁSICA" 
+                                type="number" 
+                                val={activeTollData.basic} 
+                                set={(v:any) => updateTollTable(selectedTollCat, 'basic', v)} 
+                            />
+                            <Input 
+                                label="SUCIVE" 
+                                type="number" 
+                                val={activeTollData.sucive} 
+                                set={(v:any) => updateTollTable(selectedTollCat, 'sucive', v)} 
+                            />
                         </div>
                         
-                        {/* Dropdown Categorías 1-7 */}
-                        <div className="border border-gray-100 rounded-lg overflow-hidden">
-                            <button 
-                                onClick={() => setShowTollCategories(!showTollCategories)}
-                                className="w-full bg-gray-50 p-2 flex justify-between items-center text-xs font-bold text-gray-600 hover:bg-gray-100 transition"
-                            >
-                                <span className="flex items-center gap-2"><Eye className="w-3 h-3"/> Ver Categorías 1 a 7</span>
-                                {showTollCategories ? <ChevronUp className="w-4 h-4"/> : <ChevronDown className="w-4 h-4"/>}
-                            </button>
-                            
-                            {showTollCategories && (
-                                <div className="p-2 bg-white overflow-x-auto">
-                                    <table className="w-full text-[10px] text-left">
-                                        <thead>
-                                            <tr className="border-b border-gray-100 text-gray-400">
-                                                <th className="py-1">Cat</th>
-                                                <th className="py-1">Descripción</th>
-                                                <th className="py-1 text-right">Telepeaje</th>
-                                                <th className="py-1 text-right">Efectivo</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {tollTableData.map((row) => (
-                                                <tr key={row.cat} className="border-b border-gray-50 last:border-0 hover:bg-blue-50">
-                                                    <td className="py-1 font-bold text-blue-600">{row.cat}</td>
-                                                    <td className="py-1 text-gray-600 truncate max-w-[120px]">{row.desc}</td>
-                                                    <td className="py-1 text-right font-mono">${row.telepeaje.toFixed(2)}</td>
-                                                    <td className="py-1 text-right font-mono">${row.efectivo.toFixed(2)}</td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            )}
-                        </div>
                         <SectionFooter updated={localSettings.mtop_updated} source={localSettings.mtop_source} sourceLabel="Fuente: gub.uy/mtop" />
                     </div>
 
