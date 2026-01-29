@@ -1,193 +1,181 @@
 
-import { initializeApp, getApps, getApp } from "firebase/app";
-import { 
-    getFirestore, 
-    collection, 
-    onSnapshot, 
-    addDoc, 
-    updateDoc, 
-    deleteDoc, 
-    doc, 
-    setDoc, 
-    writeBatch, 
-    getDocs,
-    initializeFirestore, 
-    persistentLocalCache, 
-    persistentMultipleTabManager 
-} from "firebase/firestore";
-import { 
-    getAuth, 
-    GoogleAuthProvider, 
-    signInWithPopup, 
-    signOut, 
-    onAuthStateChanged 
-} from "firebase/auth";
+// --- INDEXED DB IMPLEMENTATION ---
+// Replaces Firebase Firestore with local Native IndexedDB
+// Keeps the same API signature so UI components don't break.
 
-const CONFIG_KEY = 'firebase_config_json';
+const DB_NAME = 'MicrolabDB';
+const DB_VERSION = 1;
+const COLLECTIONS = ['tickets', 'inventory', 'contacts', 'settings'];
 
-let app: any = null;
-let db: any = null;
-let auth: any = null;
+let dbPromise: Promise<IDBDatabase> | null = null;
+const listeners: Record<string, Function[]> = {};
 
-// --- CONFIGURATION MANAGEMENT ---
-
-const getStoredConfig = () => {
-    const stored = localStorage.getItem(CONFIG_KEY);
-    if (stored) {
-        try { return JSON.parse(stored); } catch (e) { return null; }
-    }
-    return null;
+// Helper: Notify subscribers when data changes
+const notify = async (collectionName: string) => {
+    if (!listeners[collectionName]) return;
+    const data = await getAll(collectionName);
+    listeners[collectionName].forEach(cb => cb(data));
 };
 
-export const hasCustomConfig = () => !!getStoredConfig();
+// Initialize DB
+const initDB = (): Promise<IDBDatabase> => {
+    if (dbPromise) return dbPromise;
 
-export const saveFirebaseConfig = (configStr: string) => {
-    try {
-        const config = JSON.parse(configStr);
-        if (!config.apiKey || !config.projectId) throw new Error("Configuración inválida");
-        localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
-        window.location.reload();
-    } catch (e) {
-        throw new Error("El texto ingresado no es un JSON válido de Firebase.");
-    }
-};
-
-export const resetFirebaseConfig = () => {
-    localStorage.removeItem(CONFIG_KEY);
-    window.location.reload();
-};
-
-// --- INITIALIZATION ---
-
-const initFirebase = () => {
-    if (getApps().length > 0) {
-        app = getApp();
-        db = getFirestore(app);
-        auth = getAuth(app);
-        return;
-    }
-
-    const config = getStoredConfig();
-    if (config) {
-        try {
-            app = initializeApp(config);
-            // Initialize Firestore with Offline Persistence (Modern SDK)
-            db = initializeFirestore(app, {
-                localCache: persistentLocalCache({
-                    tabManager: persistentMultipleTabManager()
-                })
+    dbPromise = new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        
+        request.onupgradeneeded = (e: any) => {
+            const db = e.target.result;
+            COLLECTIONS.forEach(col => {
+                if (!db.objectStoreNames.contains(col)) {
+                    db.createObjectStore(col, { keyPath: 'id' });
+                }
             });
-            auth = getAuth(app);
-            console.log("🔥 Firebase initialized with Offline Persistence");
-        } catch (e) {
-            console.error("Firebase init error:", e);
-            localStorage.removeItem(CONFIG_KEY); // Clear bad config
-        }
-    }
+        };
+        
+        request.onsuccess = (e: any) => {
+            console.log("💾 IndexedDB Initialized");
+            resolve(e.target.result);
+        };
+        
+        request.onerror = (e) => reject(e);
+    });
+    return dbPromise;
 };
 
-initFirebase();
-
-// --- AUTHENTICATION ---
-
-export { auth };
-
-export const loginWithGoogle = async () => {
-    if (!auth) {
-        // Throw specific error to trigger config modal in Login.tsx
-        const e: any = new Error("Firebase not configured");
-        e.code = 'auth/configuration-not-found';
-        throw e;
-    }
-    const provider = new GoogleAuthProvider();
-    return signInWithPopup(auth, provider);
+// Generic Actions
+const getAll = async (collectionName: string) => {
+    const db = await initDB();
+    return new Promise<any[]>((resolve, reject) => {
+        const tx = db.transaction(collectionName, 'readonly');
+        const store = tx.objectStore(collectionName);
+        const req = store.getAll();
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+    });
 };
 
-export const logout = async () => {
-    if (auth) await signOut(auth);
-};
-
-export const onAuthChange = (callback: (user: any) => void) => {
-    if (!auth) {
-        callback(null);
-        return () => {};
-    }
-    return onAuthStateChanged(auth, callback);
-};
-
-// --- DATABASE OPERATIONS ---
+// --- API EXPORTS (Matching Firebase Interface) ---
 
 export const subscribeToCollection = (collectionName: string, callback: (data: any[]) => void) => {
-    if (!db) return () => {};
+    if (!listeners[collectionName]) listeners[collectionName] = [];
+    listeners[collectionName].push(callback);
     
-    const colRef = collection(db, collectionName);
-    const unsubscribe = onSnapshot(colRef, 
-        (snapshot) => {
-            const data = snapshot.docs.map(doc => ({
-                id: doc.id,
-                ...doc.data()
-            }));
-            callback(data);
-        },
-        (error) => {
-            console.error(`Error subscribing to ${collectionName}:`, error);
-            // Fallback for permissions errors or offline sync issues
-        }
-    );
-    return unsubscribe;
+    // Initial fetch
+    getAll(collectionName).then(callback);
+    
+    return () => {
+        listeners[collectionName] = listeners[collectionName].filter(cb => cb !== callback);
+    };
 };
 
 export const addData = async (collectionName: string, data: any) => {
-    if (!db) throw new Error("Database not initialized");
-    // If data has an ID, use setDoc, otherwise addDoc
-    if (data.id && typeof data.id === 'string') {
-        await setDoc(doc(db, collectionName, data.id), data);
-        return { id: data.id };
-    } else {
-        const docRef = await addDoc(collection(db, collectionName), data);
-        return { id: docRef.id };
-    }
+    const db = await initDB();
+    const id = data.id ? String(data.id) : String(Date.now() + Math.random().toString().slice(2, 6));
+    const item = { ...data, id };
+    
+    return new Promise<{id: string}>((resolve, reject) => {
+        const tx = db.transaction(collectionName, 'readwrite');
+        const store = tx.objectStore(collectionName);
+        store.put(item); // Put handles both insert and update if key exists
+        tx.oncomplete = () => {
+            notify(collectionName);
+            resolve({ id });
+        };
+        tx.onerror = () => reject(tx.error);
+    });
 };
 
 export const updateData = async (collectionName: string, id: string, data: any) => {
-    if (!db) throw new Error("Database not initialized");
-    const docRef = doc(db, collectionName, id);
-    await updateDoc(docRef, data);
+    const db = await initDB();
+    return new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(collectionName, 'readwrite');
+        const store = tx.objectStore(collectionName);
+        
+        // Need to get first to merge
+        const getReq = store.get(String(id));
+        getReq.onsuccess = () => {
+            const existing = getReq.result;
+            if (existing) {
+                store.put({ ...existing, ...data });
+            } else {
+                // If it doesn't exist, create it (fallback)
+                store.put({ id: String(id), ...data });
+            }
+        };
+
+        tx.oncomplete = () => {
+            notify(collectionName);
+            resolve();
+        };
+        tx.onerror = () => reject(tx.error);
+    });
 };
 
 export const setData = async (collectionName: string, id: string, data: any) => {
-    if (!db) throw new Error("Database not initialized");
-    const docRef = doc(db, collectionName, id);
-    await setDoc(docRef, data, { merge: true });
+    // In IDB setData and addData are similar due to 'put', but let's be explicit
+    return addData(collectionName, { ...data, id });
 };
 
 export const deleteData = async (collectionName: string, id: string) => {
-    if (!db) throw new Error("Database not initialized");
-    await deleteDoc(doc(db, collectionName, id));
+    const db = await initDB();
+    return new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(collectionName, 'readwrite');
+        const store = tx.objectStore(collectionName);
+        store.delete(String(id));
+        tx.oncomplete = () => {
+            notify(collectionName);
+            resolve();
+        };
+        tx.onerror = () => reject(tx.error);
+    });
 };
 
 export const importDataBatch = async (collectionName: string, newItems: any[]) => {
-    if (!db) throw new Error("Database not initialized");
-    const batch = writeBatch(db);
-    
-    newItems.forEach(item => {
-        const id = item.id || doc(collection(db, collectionName)).id;
-        const docRef = doc(db, collectionName, String(id));
-        batch.set(docRef, { ...item, id }, { merge: true });
-    });
+    const db = await initDB();
+    return new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(collectionName, 'readwrite');
+        const store = tx.objectStore(collectionName);
+        
+        newItems.forEach(item => {
+             const id = item.id ? String(item.id) : String(Date.now() + Math.random());
+             store.put({ ...item, id });
+        });
 
-    await batch.commit();
+        tx.oncomplete = () => {
+            notify(collectionName);
+            resolve();
+        };
+        tx.onerror = () => reject(tx.error);
+    });
 };
 
 export const clearCollectionData = async (collectionName: string) => {
-    if (!db) throw new Error("Database not initialized");
-    const colRef = collection(db, collectionName);
-    const snapshot = await getDocs(colRef);
-    const batch = writeBatch(db);
-    
-    snapshot.docs.forEach((doc) => {
-        batch.delete(doc.ref);
+    const db = await initDB();
+    return new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(collectionName, 'readwrite');
+        const store = tx.objectStore(collectionName);
+        store.clear();
+        tx.oncomplete = () => {
+            notify(collectionName);
+            resolve();
+        };
+        tx.onerror = () => reject(tx.error);
     });
-
-    await batch.commit();
 };
+
+// --- MOCKS FOR AUTH / CONFIG (Since we removed Firebase Auth) ---
+
+export const auth = null;
+export const loginWithGoogle = async () => {};
+export const logout = async () => {};
+// Auto-login as local user
+export const onAuthChange = (callback: (user: any) => void) => {
+    setTimeout(() => {
+        callback({ uid: 'local-idb', displayName: 'Usuario Local', email: 'local@device' });
+    }, 100);
+    return () => {};
+};
+export const hasCustomConfig = () => false;
+export const saveFirebaseConfig = () => {};
+export const resetFirebaseConfig = () => {};

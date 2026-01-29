@@ -11,7 +11,7 @@ import { ConfirmationModal } from './components/UIComponents.tsx';
 
 const App = () => {
     // Hardcoded local user
-    const activeUser = { uid: 'local-tech', displayName: 'Técnico Local', email: 'offline@system' };
+    const activeUser = { uid: 'local-tech', displayName: 'Técnico Local', email: 'offline@indexed-db' };
 
     const [view, setView] = useState('list');
     const [tickets, setTickets] = useState<Ticket[]>([]);
@@ -65,7 +65,7 @@ const App = () => {
                         Microlab
                         <span title="Modo Local"><Database className="w-4 h-4 text-green-300" /></span>
                     </h1>
-                    <span className="text-[10px] opacity-70 font-medium uppercase tracking-widest">Local Offline v2.0</span>
+                    <span className="text-[10px] opacity-70 font-medium uppercase tracking-widest">IndexedDB v2.0</span>
                 </div>
                 <div className="flex gap-3">
                     {(view==='report'||view==='create') && unsavedChanges && (
