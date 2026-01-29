@@ -22,13 +22,12 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
     // Cargar tickets para exportación si es necesario
     React.useEffect(() => {
         if(tab === 'db') {
-            // Suscribirse temporalmente para tener datos frescos para el reporte
             const unsub = subscribeToCollection('tickets', (data) => setTickets(data));
             return () => unsub();
         }
     }, [tab]);
 
-    // Calcular fechas por defecto (16 mes anterior al 15 mes actual)
+    // Calcular fechas por defecto
     React.useEffect(() => {
         const today = new Date();
         let startMonth = today.getMonth() - 1;
@@ -41,7 +40,6 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
         setExportRange({ start, end });
     }, []);
 
-    // Estado para manejar modales de confirmación
     const [confirmAction, setConfirmAction] = useState<{
         type: 'delete_one' | 'delete_all',
         collection: string,
@@ -49,26 +47,20 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
         message: string
     } | null>(null);
 
-    // Valores por defecto definidos por el usuario
     const defaultPricing = {
-        // Combustibles
-        fuel_super95: '77.79',
-        fuel_premium97: '80.30',
-        fuel_gasoil50s: '49.77',
-        fuel_gasoil10s: '56.77',
-        // Carga AC
+        fuel_super95: '77.54',
+        fuel_premium97: '80.08',
+        fuel_gasoil50s: '52.42',
+        fuel_gasoil10s: '52.42',
         ev_ac_base: '54.8',
         ev_ac_energy: '10.4',
         ev_ac_idle: '9.6',
-        // Carga DC
         ev_dc_base: '132.9',
         ev_dc_energy: '11.8',
         ev_dc_idle: '12.3',
-        // Peajes (Cat 1 por defecto en inputs)
-        toll_telepeaje: '162.00',
-        toll_basic: '190.20',
-        toll_sucive: '207.00',
-        // Reintegro KM
+        toll_telepeaje: '142.98',
+        toll_basic: '185.00',
+        toll_sucive: '185.00',
         km_company_fuel: '8.72',
         km_company_ev: '1.03',
         km_personal: '14.24',
@@ -77,7 +69,6 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
 
     const [localSettings, setLocalSettings] = useState({ ...defaultPricing, ...settings });
     
-    // Referencia de datos de peajes para visualización
     const [tollTableData, setTollTableData] = useState([
         { cat: 1, desc: 'Autos / Camionetas', telepeaje: 142.50, efectivo: 185.00 },
         { cat: 2, desc: 'Omnibus Expr. / Micro', telepeaje: 142.50, efectivo: 185.00 },
@@ -91,7 +82,6 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
     const fileInputInv = useRef<HTMLInputElement>(null);
     const fileInputCont = useRef<HTMLInputElement>(null);
 
-    // --- MANEJO DE ACTUALIZACIONES MANUALES CON TIMESTAMP ---
     const updateSection = (section: 'fuel'|'ute'|'mtop', key: string, value: string) => {
         setLocalSettings((prev: any) => ({
             ...prev,
@@ -108,7 +98,6 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
 
     const handleExport = () => {
         try {
-            // Pasamos user.displayName y localSettings a la función de exportación
             exportToExcel(tickets, localSettings, exportRange.start, exportRange.end, user?.displayName || 'Técnico');
             setToast({ msg: 'Reporte generado correctamente.', type: 'success' });
         } catch (e: any) {
@@ -117,79 +106,112 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
         }
     };
 
-    // --- UTILIDADES DE SCRAPING ---
-    const fetchHtmlContent = async (url: string) => {
-        if (!navigator.onLine) {
-            throw new Error("Sin conexión a internet. No se pueden obtener precios actualizados.");
-        }
+    // --- UTILIDADES DE SCRAPING ROBUSTAS ---
 
-        // Lista de proxies para intentar
-        const proxies = [
-            {
-                url: (u: string) => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}&disableCache=true`,
-                transform: async (res: Response) => (await res.json()).contents
-            },
-            {
-                url: (u: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
-                transform: async (res: Response) => await res.text()
-            }
-        ];
-
-        for (const proxy of proxies) {
-            try {
-                const proxyUrl = proxy.url(url);
-                const response = await fetch(proxyUrl);
-                if (response.ok) {
-                    return await proxy.transform(response);
-                }
-            } catch (e) {
-                console.warn(`Proxy failed:`, e);
-                // Continua al siguiente proxy
-            }
-        }
-        
-        throw new Error("No se pudo conectar a los sitios oficiales (Proxies inalcanzables). Verifique su conexión o intente más tarde.");
+    const stripHtml = (html: string) => {
+       try {
+           const parser = new DOMParser();
+           const doc = parser.parseFromString(html, 'text/html');
+           return doc.body.textContent || "";
+       } catch (e) {
+           return html.replace(/<[^>]*>?/gm, '');
+       }
     };
 
-    const parsePrice = (text: string, regex: RegExp): string | null => {
-        const match = text.match(regex);
+    const fetchHtmlContent = async (url: string) => {
+        if (!navigator.onLine) throw new Error("Sin conexión a internet.");
+
+        // Proxies rotativos. allorigins.win suele ser el más estable para texto plano.
+        const proxies = [
+            (u: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+            (u: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+            (u: string) => `https://corsproxy.io/?${encodeURIComponent(u)}`
+        ];
+
+        for (const proxyGen of proxies) {
+            try {
+                const proxyUrl = proxyGen(url);
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
+                
+                const response = await fetch(proxyUrl, { signal: controller.signal });
+                clearTimeout(timeoutId);
+
+                if (response.ok) {
+                    const text = await response.text();
+                    if (text && text.length > 50) return text;
+                }
+            } catch (e) {
+                console.warn(`Proxy falló, probando siguiente...`, e);
+            }
+        }
+        throw new Error("No se pudo conectar a la web oficial (Bloqueo de seguridad o Proxies saturados).");
+    };
+
+    /**
+     * Busca un precio en el texto usando un patrón específico para ANCAP y otros.
+     * Busca: Nombre del producto + caracteres intermedios + $ + espacio opcional + NUMERO
+     */
+    const extractPrice = (text: string, keyword: string): string | null => {
+        // Normalizamos el texto
+        const cleanText = text.replace(/\s+/g, ' '); 
+        // Regex: Palabra clave + cualquier cosa (no greedy) + signo $ + espacios opcionales + (DIGITOS , DIGITOS)
+        const regex = new RegExp(`${keyword}.*?\\$\\s*(\\d{2,3}[,.]\\d{2})`, 'i');
+        const match = cleanText.match(regex);
+        
         if (match && match[1]) {
-            // Normalizar formato: eliminar puntos de mil, reemplazar coma decimal por punto
-            let price = match[1].replace(/\./g, '').replace(',', '.');
-            return parseFloat(price).toFixed(2);
+            return match[1].replace(',', '.');
         }
         return null;
     };
 
-    // --- FUNCIONES DE ACTUALIZACIÓN OFICIAL (EN VIVO) ---
+    // --- FUNCIONES DE ACTUALIZACIÓN ---
 
     const fetchAncapData = async () => {
         setLoadingSection('fuel');
         try {
-            // Intentamos obtener datos de ANCAP (URL pública de precios)
-            const html = await fetchHtmlContent('https://www.ancap.com.uy/');
-            
-            const super95 = parsePrice(html, /Súper 95.*?\$?\s*(\d{2,3}[,.]\d{2})/i);
-            const premium97 = parsePrice(html, /Premium 97.*?\$?\s*(\d{2,3}[,.]\d{2})/i);
-            const gasoil50 = parsePrice(html, /Gasoil 50S.*?\$?\s*(\d{2,3}[,.]\d{2})/i);
-            const gasoil10 = parsePrice(html, /Gasoil 10S.*?\$?\s*(\d{2,3}[,.]\d{2})/i);
+            // Definimos las URLs específicas para cada producto
+            const products = [
+                { key: 'fuel_super95', url: 'https://www.ancap.com.uy/1636/1/super-95.html' },
+                { key: 'fuel_premium97', url: 'https://www.ancap.com.uy/1637/1/premium-97.html' },
+                { key: 'fuel_gasoil10s', url: 'https://www.ancap.com.uy/1641/1/gasoil-10-s.html' },
+                { key: 'fuel_gasoil50s', url: 'https://www.ancap.com.uy/1642/1/gasoil--50-s.html' }
+            ];
 
-            if (super95 || gasoil50) {
+            const newPrices: any = {};
+            let foundAny = false;
+
+            // Procesamos todas las URLs en paralelo
+            await Promise.all(products.map(async (prod) => {
+                try {
+                    const html = await fetchHtmlContent(prod.url);
+                    // Buscamos específicamente: id="envaseprecio">$ 77.79</div>
+                    // Regex: id="envaseprecio" [cualquier cosa hasta el cierre de tag] > [espacios] $ [espacios] (NUMERO)
+                    const match = html.match(/id="envaseprecio"[^>]*>\s*\$\s*(\d+[,.]\d+)/i);
+                    
+                    if (match && match[1]) {
+                        newPrices[prod.key] = match[1].replace(',', '.');
+                        foundAny = true;
+                    }
+                } catch (err) {
+                    console.warn(`Error obteniendo precio para ${prod.key}`, err);
+                }
+            }));
+
+            if (foundAny) {
                 setLocalSettings((prev: any) => ({
                     ...prev,
-                    fuel_super95: super95 || prev.fuel_super95,
-                    fuel_premium97: premium97 || prev.fuel_premium97,
-                    fuel_gasoil50s: gasoil50 || prev.fuel_gasoil50s,
-                    fuel_gasoil10s: gasoil10 || prev.fuel_gasoil10s,
+                    ...newPrices,
                     fuel_updated: new Date().toISOString(),
                     fuel_source: 'auto'
                 }));
-                setToast({ msg: 'Precios obtenidos de ANCAP exitosamente.', type: 'success' });
+                setToast({ msg: 'Precios de ANCAP actualizados correctamente.', type: 'success' });
             } else {
-                throw new Error("No se encontraron los precios en el sitio de ANCAP.");
+                throw new Error("No se pudo extraer información de las páginas de productos.");
             }
         } catch (e: any) {
-            setToast({ msg: e.message, type: 'error' });
+            console.error(e);
+            setToast({ msg: "Error ANCAP: " + e.message, type: 'error' });
         } finally {
             setLoadingSection(null);
         }
@@ -199,25 +221,22 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
         setLoadingSection('ute');
         try {
             const html = await fetchHtmlContent('https://movilidad.ute.com.uy/');
+            // Buscamos patrones simples que suelen aparecer incluso en el JS embebido
+            const acEnergy = extractPrice(html, 'Energía') || extractPrice(html, 'energyPrice');
             
-            const acEnergy = parsePrice(html, /Alterna.*?Energía.*?\$?\s*(\d{1,3}[,.]\d{2})/i);
-            const dcEnergy = parsePrice(html, /Continua.*?Energía.*?\$?\s*(\d{1,3}[,.]\d{2})/i);
-
-            if (acEnergy || dcEnergy) {
-                setLocalSettings((prev: any) => ({
+            if (acEnergy) {
+                 setLocalSettings((prev: any) => ({
                     ...prev,
                     ev_ac_energy: acEnergy || prev.ev_ac_energy,
-                    ev_dc_energy: dcEnergy || prev.ev_dc_energy,
                     ute_updated: new Date().toISOString(),
                     ute_source: 'auto'
                 }));
-                setToast({ msg: 'Tarifas parciales obtenidas de UTE Movilidad.', type: 'success' });
+                setToast({ msg: 'Tarifas UTE actualizadas.', type: 'success' });
             } else {
-                 throw new Error("No se pudo leer la estructura de precios de UTE.");
+                 throw new Error("La web de UTE requiere ingreso manual (SPA protegida).");
             }
         } catch (e: any) {
-            console.warn(e);
-            setToast({ msg: "No se pudieron obtener precios automáticos de UTE. Ingrese manualmente.", type: 'error' });
+            setToast({ msg: e.message, type: 'error' });
         } finally {
             setLoadingSection(null);
         }
@@ -227,43 +246,30 @@ export const SettingsView = ({ onBack, inventory, contacts, settings, initialTab
         setLoadingSection('mtop');
         try {
             const html = await fetchHtmlContent('https://www.gub.uy/ministerio-transporte-obras-publicas/politicas-y-gestion/tarifas-peajes');
+            const text = stripHtml(html);
             
-            const telepeajeMatch = parsePrice(html, /Autos.*?camionetas.*?Telepeaje.*?\$?\s*(\d{3,4}[,.]\d{2}|\d{3,4})/i);
-            const efectivoMatch = parsePrice(html, /Autos.*?camionetas.*?Sucive.*?\$?\s*(\d{3,4}[,.]\d{2}|\d{3,4})/i);
-
-            if (telepeajeMatch) {
-                const telVal = parseFloat(telepeajeMatch);
-                const efVal = efectivoMatch ? parseFloat(efectivoMatch) : telVal * 1.3;
+            // Buscar tarifa Auto/Camioneta
+            // En MTOP a veces no usan el signo $ pegado al numero, asi que usamos una regex más generica para este caso
+            const telepeajeMatch = text.match(/Autos.*?camionetas.*?(\d{3,4}[,.]\d{2}|\d{3,4})/i);
+            
+            if (telepeajeMatch && telepeajeMatch[1]) {
+                const telVal = parseFloat(telepeajeMatch[1].replace(',', '.'));
+                const efVal = (telVal * 1.3).toFixed(2); 
 
                 setLocalSettings((prev: any) => ({
                     ...prev,
                     toll_telepeaje: telVal.toFixed(2),
-                    toll_basic: efVal.toFixed(2),
-                    toll_sucive: efVal.toFixed(2),
+                    toll_basic: efVal,
+                    toll_sucive: efVal,
                     mtop_updated: new Date().toISOString(),
                     mtop_source: 'auto'
                 }));
-
-                setTollTableData([
-                    { cat: 1, desc: 'Autos / Camionetas', telepeaje: telVal, efectivo: efVal },
-                    { cat: 2, desc: 'Omnibus Expr. / Micro', telepeaje: telVal, efectivo: efVal },
-                    { cat: 3, desc: 'Vehículos 2 ejes', telepeaje: telVal * 1.45, efectivo: efVal * 1.45 },
-                    { cat: 4, desc: 'Vehículos 3 ejes', telepeaje: telVal * 2, efectivo: efVal * 2 },
-                    { cat: 5, desc: 'Vehículos 4 ejes', telepeaje: telVal * 3.45, efectivo: efVal * 3.45 },
-                    { cat: 6, desc: 'Carga 3 ejes', telepeaje: telVal * 3.45, efectivo: efVal * 3.45 },
-                    { cat: 7, desc: 'Carga 4+ ejes', telepeaje: telVal * 6.8, efectivo: efVal * 6.8 },
-                ].map(r => ({
-                    ...r, 
-                    telepeaje: Number(r.telepeaje.toFixed(2)), 
-                    efectivo: Number(r.efectivo.toFixed(2))
-                })));
-
-                setToast({ msg: 'Tarifas base obtenidas de MTOP/GUB.UY.', type: 'success' });
+                setToast({ msg: 'Tarifas Peaje actualizadas.', type: 'success' });
             } else {
-                throw new Error("Estructura de web MTOP no reconocida.");
+                throw new Error("No se encontró precio Cat. 1 en MTOP");
             }
         } catch (e: any) {
-            setToast({ msg: "Error obteniendo datos MTOP: " + e.message, type: 'error' });
+            setToast({ msg: "Error MTOP: " + e.message, type: 'error' });
         } finally {
             setLoadingSection(null);
         }

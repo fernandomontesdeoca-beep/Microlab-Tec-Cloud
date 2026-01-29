@@ -1,241 +1,193 @@
 
-// OFFLINE / INDEXEDDB ADAPTER
-// High-performance offline database replacing Firebase
+import { initializeApp, getApps, getApp } from "firebase/app";
+import { 
+    getFirestore, 
+    collection, 
+    onSnapshot, 
+    addDoc, 
+    updateDoc, 
+    deleteDoc, 
+    doc, 
+    setDoc, 
+    writeBatch, 
+    getDocs,
+    initializeFirestore, 
+    persistentLocalCache, 
+    persistentMultipleTabManager 
+} from "firebase/firestore";
+import { 
+    getAuth, 
+    GoogleAuthProvider, 
+    signInWithPopup, 
+    signOut, 
+    onAuthStateChanged 
+} from "firebase/auth";
 
-const DB_NAME = 'microlab_db';
-const DB_VERSION = 1;
-const COLLECTIONS = ['tickets', 'inventory', 'contacts', 'settings'];
+const CONFIG_KEY = 'firebase_config_json';
 
-const listeners: { [key: string]: Array<(data: any[]) => void> } = {};
+let app: any = null;
+let db: any = null;
+let auth: any = null;
 
-// --- HELPER: OPEN DATABASE ---
-const openDB = (): Promise<IDBDatabase> => {
-    return new Promise((resolve, reject) => {
-        const request = indexedDB.open(DB_NAME, DB_VERSION);
+// --- CONFIGURATION MANAGEMENT ---
 
-        request.onerror = (event) => {
-            console.error("IndexedDB error:", request.error);
-            reject(request.error);
-        };
-
-        request.onsuccess = (event) => {
-            resolve(request.result);
-        };
-
-        request.onupgradeneeded = (event) => {
-            const db = (event.target as IDBOpenDBRequest).result;
-            // Create object stores for each collection if they don't exist
-            COLLECTIONS.forEach(col => {
-                if (!db.objectStoreNames.contains(col)) {
-                    db.createObjectStore(col, { keyPath: 'id' });
-                }
-            });
-        };
-    });
+const getStoredConfig = () => {
+    const stored = localStorage.getItem(CONFIG_KEY);
+    if (stored) {
+        try { return JSON.parse(stored); } catch (e) { return null; }
+    }
+    return null;
 };
 
-// --- HELPER: NOTIFY LISTENERS ---
-const notifyListeners = async (collectionName: string) => {
-    if (!listeners[collectionName] || listeners[collectionName].length === 0) return;
+export const hasCustomConfig = () => !!getStoredConfig();
 
+export const saveFirebaseConfig = (configStr: string) => {
     try {
-        const db = await openDB();
-        const transaction = db.transaction(collectionName, 'readonly');
-        const store = transaction.objectStore(collectionName);
-        const request = store.getAll();
-
-        request.onsuccess = () => {
-            const data = request.result;
-            listeners[collectionName].forEach(callback => callback(data));
-        };
+        const config = JSON.parse(configStr);
+        if (!config.apiKey || !config.projectId) throw new Error("Configuración inválida");
+        localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
+        window.location.reload();
     } catch (e) {
-        console.error(`Error notifying listeners for ${collectionName}:`, e);
+        throw new Error("El texto ingresado no es un JSON válido de Firebase.");
     }
 };
 
-// --- API COMPATIBLE (MOCK AUTH) ---
-
-export const auth = null;
-export const loginWithGoogle = async () => { console.log("Auth disabled"); return { user: { uid: 'local', displayName: 'Local User' } }; };
-export const logout = async () => { console.log("Logout disabled"); };
-export const onAuthChange = (callback: (user: any) => void) => {
-    callback({
-        uid: 'local-tech',
-        displayName: 'Técnico de Campo',
-        email: 'local@microlab.app',
-        photoURL: null
-    });
-    return () => {};
+export const resetFirebaseConfig = () => {
+    localStorage.removeItem(CONFIG_KEY);
+    window.location.reload();
 };
 
-// --- DATABASE FUNCTIONS (INDEXEDDB IMPLEMENTATION) ---
+// --- INITIALIZATION ---
+
+const initFirebase = () => {
+    if (getApps().length > 0) {
+        app = getApp();
+        db = getFirestore(app);
+        auth = getAuth(app);
+        return;
+    }
+
+    const config = getStoredConfig();
+    if (config) {
+        try {
+            app = initializeApp(config);
+            // Initialize Firestore with Offline Persistence (Modern SDK)
+            db = initializeFirestore(app, {
+                localCache: persistentLocalCache({
+                    tabManager: persistentMultipleTabManager()
+                })
+            });
+            auth = getAuth(app);
+            console.log("🔥 Firebase initialized with Offline Persistence");
+        } catch (e) {
+            console.error("Firebase init error:", e);
+            localStorage.removeItem(CONFIG_KEY); // Clear bad config
+        }
+    }
+};
+
+initFirebase();
+
+// --- AUTHENTICATION ---
+
+export { auth };
+
+export const loginWithGoogle = async () => {
+    if (!auth) {
+        // Throw specific error to trigger config modal in Login.tsx
+        const e: any = new Error("Firebase not configured");
+        e.code = 'auth/configuration-not-found';
+        throw e;
+    }
+    const provider = new GoogleAuthProvider();
+    return signInWithPopup(auth, provider);
+};
+
+export const logout = async () => {
+    if (auth) await signOut(auth);
+};
+
+export const onAuthChange = (callback: (user: any) => void) => {
+    if (!auth) {
+        callback(null);
+        return () => {};
+    }
+    return onAuthStateChanged(auth, callback);
+};
+
+// --- DATABASE OPERATIONS ---
 
 export const subscribeToCollection = (collectionName: string, callback: (data: any[]) => void) => {
-    // 1. Register listener
-    if (!listeners[collectionName]) {
-        listeners[collectionName] = [];
-    }
-    listeners[collectionName].push(callback);
-
-    // 2. Fetch initial data asynchronously
-    openDB().then(db => {
-        if (!db.objectStoreNames.contains(collectionName)) return; // Guard clause
-        
-        const transaction = db.transaction(collectionName, 'readonly');
-        const store = transaction.objectStore(collectionName);
-        const request = store.getAll();
-
-        request.onsuccess = () => {
-            callback(request.result);
-        };
-    }).catch(console.error);
-
-    // 3. Return unsubscribe function
-    return () => {
-        listeners[collectionName] = listeners[collectionName].filter(cb => cb !== callback);
-    };
+    if (!db) return () => {};
+    
+    const colRef = collection(db, collectionName);
+    const unsubscribe = onSnapshot(colRef, 
+        (snapshot) => {
+            const data = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data()
+            }));
+            callback(data);
+        },
+        (error) => {
+            console.error(`Error subscribing to ${collectionName}:`, error);
+            // Fallback for permissions errors or offline sync issues
+        }
+    );
+    return unsubscribe;
 };
 
 export const addData = async (collectionName: string, data: any) => {
-    const db = await openDB();
-    
-    // Generate ID if missing
-    const id = data.id || (Date.now().toString(36) + Math.random().toString(36).substr(2, 5));
-    const item = { ...data, id };
-
-    return new Promise((resolve, reject) => {
-        const transaction = db.transaction(collectionName, 'readwrite');
-        const store = transaction.objectStore(collectionName);
-        const request = store.add(item);
-
-        request.onsuccess = () => {
-            notifyListeners(collectionName);
-            resolve({ id });
-        };
-
-        request.onerror = () => reject(request.error);
-    });
+    if (!db) throw new Error("Database not initialized");
+    // If data has an ID, use setDoc, otherwise addDoc
+    if (data.id && typeof data.id === 'string') {
+        await setDoc(doc(db, collectionName, data.id), data);
+        return { id: data.id };
+    } else {
+        const docRef = await addDoc(collection(db, collectionName), data);
+        return { id: docRef.id };
+    }
 };
 
 export const updateData = async (collectionName: string, id: string, data: any) => {
-    const db = await openDB();
-    
-    return new Promise((resolve, reject) => {
-        const transaction = db.transaction(collectionName, 'readwrite');
-        const store = transaction.objectStore(collectionName);
-        
-        // First get the existing item to merge
-        const getRequest = store.get(id);
-
-        getRequest.onsuccess = () => {
-            const existing = getRequest.result;
-            if (existing) {
-                const updated = { ...existing, ...data };
-                const putRequest = store.put(updated);
-                
-                putRequest.onsuccess = () => {
-                    notifyListeners(collectionName);
-                    resolve(true);
-                };
-                putRequest.onerror = () => reject(putRequest.error);
-            } else {
-                reject(new Error("Document not found"));
-            }
-        };
-        
-        getRequest.onerror = () => reject(getRequest.error);
-    });
+    if (!db) throw new Error("Database not initialized");
+    const docRef = doc(db, collectionName, id);
+    await updateDoc(docRef, data);
 };
 
 export const setData = async (collectionName: string, id: string, data: any) => {
-    const db = await openDB();
-
-    return new Promise((resolve, reject) => {
-        const transaction = db.transaction(collectionName, 'readwrite');
-        const store = transaction.objectStore(collectionName);
-        const item = { ...data, id };
-        
-        // Put creates or overwrites
-        const request = store.put(item);
-
-        request.onsuccess = () => {
-            notifyListeners(collectionName);
-            resolve(true);
-        };
-
-        request.onerror = () => reject(request.error);
-    });
+    if (!db) throw new Error("Database not initialized");
+    const docRef = doc(db, collectionName, id);
+    await setDoc(docRef, data, { merge: true });
 };
 
 export const deleteData = async (collectionName: string, id: string) => {
-    const db = await openDB();
-
-    return new Promise((resolve, reject) => {
-        const transaction = db.transaction(collectionName, 'readwrite');
-        const store = transaction.objectStore(collectionName);
-        const request = store.delete(id);
-
-        request.onsuccess = () => {
-            notifyListeners(collectionName);
-            resolve(true);
-        };
-
-        request.onerror = () => reject(request.error);
-    });
+    if (!db) throw new Error("Database not initialized");
+    await deleteDoc(doc(db, collectionName, id));
 };
 
 export const importDataBatch = async (collectionName: string, newItems: any[]) => {
-    const db = await openDB();
-
-    return new Promise((resolve, reject) => {
-        const transaction = db.transaction(collectionName, 'readwrite');
-        const store = transaction.objectStore(collectionName);
-        
-        let processedCount = 0;
-        let errorOccurred = false;
-
-        newItems.forEach(item => {
-            const id = item.id || (Date.now().toString(36) + Math.random().toString(36).substr(2, 5));
-            const request = store.put({ ...item, id });
-            
-            request.onsuccess = () => {
-                processedCount++;
-                if (processedCount === newItems.length) {
-                    notifyListeners(collectionName);
-                    resolve(true);
-                }
-            };
-            
-            request.onerror = () => {
-                if (!errorOccurred) {
-                    errorOccurred = true;
-                    reject(request.error);
-                }
-            };
-        });
-
-        if (newItems.length === 0) resolve(true);
+    if (!db) throw new Error("Database not initialized");
+    const batch = writeBatch(db);
+    
+    newItems.forEach(item => {
+        const id = item.id || doc(collection(db, collectionName)).id;
+        const docRef = doc(db, collectionName, String(id));
+        batch.set(docRef, { ...item, id }, { merge: true });
     });
+
+    await batch.commit();
 };
 
 export const clearCollectionData = async (collectionName: string) => {
-    const db = await openDB();
-
-    return new Promise((resolve, reject) => {
-        const transaction = db.transaction(collectionName, 'readwrite');
-        const store = transaction.objectStore(collectionName);
-        const request = store.clear();
-
-        request.onsuccess = () => {
-            notifyListeners(collectionName);
-            resolve(true);
-        };
-
-        request.onerror = () => reject(request.error);
+    if (!db) throw new Error("Database not initialized");
+    const colRef = collection(db, collectionName);
+    const snapshot = await getDocs(colRef);
+    const batch = writeBatch(db);
+    
+    snapshot.docs.forEach((doc) => {
+        batch.delete(doc.ref);
     });
-};
 
-// No-op for config helpers
-export const saveFirebaseConfig = (config: string) => { console.log("Saving config (no-op):", config); };
-export const hasCustomConfig = () => true;
-export const resetFirebaseConfig = () => {};
+    await batch.commit();
+};
